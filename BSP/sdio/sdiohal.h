@@ -88,6 +88,11 @@ extern long int sdiohal_log_level;
 #define SDIOHAL_RX_INBAND_IRQ	1
 #define SDIOHAL_RX_POLLING	2
 
+#define SDIOHAL_INT_GPIO1          0
+#define SDIOHAL_INT_INBAND         1
+#define SDIOHAL_INT_PUBINT         2
+#define SDIOHAL_INT_ESMD3          3
+
 /* channel numbers */
 #define SDIO_CHN_TX_NUM		12
 #define SDIO_CHN_RX_NUM		14
@@ -310,6 +315,7 @@ struct sdiohal_data_t {
 	atomic_t flag_suspending;
 	int gpio_num;
 	unsigned int irq_num;
+	unsigned int irq_trigger_type;
 	atomic_t irq_cnt;
 	unsigned int card_dump_flag;
 	struct sdio_func *sdio_func[SDIOHAL_MAX_FUNCS];

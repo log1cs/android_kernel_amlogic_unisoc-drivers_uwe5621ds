@@ -28,6 +28,13 @@
 //static enum of_gpio_flags rk_irq_flag;
 extern int rockchip_wifi_set_carddetect(int val);
 #endif
+#ifdef CONFIG_AML_BOARD
+#include <linux/amlogic/aml_gpio_consumer.h>
+extern int wifi_irq_num(void);
+extern int wifi_irq_trigger_level(void);
+extern void sdio_reinit(void);
+extern void sdio_set_max_regs(unsigned int size);
+#endif
 
 #if defined(CONFIG_UNISOC_BOARD) || defined(CONFIG_NXP_BOARD)
 extern void marlin_scan_finish(void);
@@ -984,7 +991,9 @@ void sdiohal_enable_rx_irq(void)
 
     if(p_data->irq_num > 0){
         sdiohal_atomic_sub(1, &p_data->irq_cnt);
-    #ifdef CONFIG_ASR_BOARD
+    #ifdef CONFIG_AML_BOARD
+        irq_set_irq_type(p_data->irq_num, p_data->irq_trigger_type);
+    #elif defined(CONFIG_ASR_BOARD)
         irq_set_irq_type(p_data->irq_num, IRQF_TRIGGER_RISING);
     #else
         irq_set_irq_type(p_data->irq_num, IRQF_TRIGGER_HIGH);
@@ -1033,9 +1042,57 @@ static int sdiohal_enable_slave_irq(void)
 	return 0;
 }
 
+#ifdef CONFIG_AML_BOARD
+static int sdiohal_irq_register(void)
+{
+	struct sdiohal_data_t *p_data = sdiohal_get_data();
+	int ret = 0;
+
+	pr_info("%s line:%d irq_type=%d, irq_num=%d, trigger_type=%d\n",
+		__func__, __LINE__, p_data->irq_type, p_data->irq_num, p_data->irq_trigger_type);
+	if ((p_data->irq_type != SDIOHAL_RX_INBAND_IRQ) && (p_data->irq_num > 0)) {
+		ret = request_irq(p_data->irq_num, sdiohal_irq_handler,
+				  p_data->irq_trigger_type | IRQF_NO_SUSPEND,
+				  "sdiohal_irq", NULL);
+		if (ret != 0) {
+			pr_err("request irq err gpio is %d, ret=%d\n", p_data->irq_num, ret);
+			return ret;
+		}
+		disable_irq(p_data->irq_num);
+		ret = irq_set_irq_wake(p_data->irq_num, 1);
+		if (ret != 0)
+			pr_err("%s(): Err setting wakeup irq\n", __func__);
+	}
+	return ret;
+}
+
+static void sdiohal_irq_deinit(void)
+{
+	struct sdiohal_data_t *p_data = sdiohal_get_data();
+
+	pr_info("[%s line:%d irq_num=%d\n", __func__, __LINE__, p_data->irq_num);
+	if (p_data->irq_num > 0) {
+		irq_set_irq_wake(p_data->irq_num, 0);
+		disable_irq(p_data->irq_num);
+		free_irq(p_data->irq_num, NULL);
+	}
+}
+#endif
+
 static int sdiohal_host_irq_init(unsigned int irq_gpio_num)
 {
 	struct sdiohal_data_t *p_data = sdiohal_get_data();
+#ifdef CONFIG_AML_BOARD
+	p_data->irq_num = wifi_irq_num();
+	if (wifi_irq_trigger_level() == GPIO_IRQ_LOW || wifi_irq_trigger_level() == IRQF_TRIGGER_LOW)
+		p_data->irq_trigger_type = IRQF_TRIGGER_LOW;
+	else
+		p_data->irq_trigger_type = IRQF_TRIGGER_HIGH;
+	pr_info("%s sdio gpio irq num:%d, trigger_type:%s\n",
+		__func__, p_data->irq_num,
+		((p_data->irq_trigger_type == IRQF_TRIGGER_LOW) ? "low" : "high"));
+	return 0;
+#else
 	int ret;
 
 	ret = gpio_request(irq_gpio_num, "sdiohal_gpio");
@@ -1053,6 +1110,7 @@ static int sdiohal_host_irq_init(unsigned int irq_gpio_num)
 	p_data->irq_num = gpio_to_irq(irq_gpio_num);
 
 	return 0;
+#endif
 }
 
 static int sdiohal_get_dev_func(struct sdio_func *func)
@@ -1107,6 +1165,11 @@ static struct mmc_host *sdiohal_dev_get_host(struct device_node *np_node)
 static int sdiohal_parse_dt(void)
 {
 	struct sdiohal_data_t *p_data = sdiohal_get_data();
+#ifdef CONFIG_AML_BOARD
+	p_data->blk_size = true;
+	p_data->irq_type = SDIOHAL_RX_EXTERNAL_IRQ;
+	return 0;
+#else
 	struct device_node *np;
 	struct device_node *sdio_node;
 	char *sdio_irq_type;
@@ -1188,6 +1251,7 @@ static int sdiohal_parse_dt(void)
 #endif
 
 	return 0;
+#endif
 }
 
 static int sdiohal_suspend(struct device *dev)
@@ -1478,6 +1542,7 @@ static int sdiohal_probe(struct sdio_func *func,
 
 	sdiohal_set_cp_pin_status();
 	
+#ifndef CONFIG_AML_BOARD
 	if(p_data->irq_type != SDIOHAL_RX_INBAND_IRQ)
 	{
 		pr_info("%s-%d ,irq_num= %d , gpio_num=%d \n", __func__ , __LINE__ , p_data->irq_num , p_data->gpio_num);
@@ -1504,6 +1569,7 @@ static int sdiohal_probe(struct sdio_func *func,
 			return ret;
 		}
 	}
+#endif
 	complete(&p_data->scan_done);
 
 	/* the card is nonremovable */
@@ -1516,6 +1582,9 @@ static int sdiohal_probe(struct sdio_func *func,
 	 */
 	if(p_data->irq_type == SDIOHAL_RX_INBAND_IRQ)
 		p_data->sdio_dev_host->caps2 &= ~MMC_CAP2_SDIO_IRQ_NOTHREAD;
+#endif
+#ifdef CONFIG_AML_BOARD
+	sdio_set_max_regs(0x80000);
 #endif
 
 	/* calling rescan callback to inform download */
@@ -1562,10 +1631,12 @@ static void sdiohal_remove(struct sdio_func *func)
 		sdio_release_host(p_data->sdio_func[FUNC_1]);
 	} else if ((p_data->irq_type == SDIOHAL_RX_EXTERNAL_IRQ) &&
 		(p_data->irq_num > 0)){
+#ifndef CONFIG_AML_BOARD
 		/* add Gavin 20230329 */
 		irq_set_irq_wake(p_data->irq_num, 0);
 		free_irq(p_data->irq_num, &func->dev);
 		p_data->irq_num = 0;
+#endif
 	}
 	pr_info("%s remove card successful\n", __func__);
 }
@@ -1633,6 +1704,12 @@ static struct sdio_driver sdiohal_driver = {
 void sdiohal_remove_card(void *wcn_dev)
 {
 	struct sdiohal_data_t *p_data = sdiohal_get_data();
+
+#ifdef CONFIG_AML_BOARD
+	/* As for amlogic platform, don't need to remove sdio card. */
+	sdiohal_irq_deinit();
+	return;
+#endif
 
 	if (!WCN_CARD_EXIST(&p_data->xmit_cnt))
 		return;
@@ -1704,8 +1781,23 @@ int quectel_platform_rescan_card(void)
 int sdiohal_scan_card(void *wcn_dev)
 {
 	struct sdiohal_data_t *p_data = sdiohal_get_data();
+	int ret = 0;
+#ifdef CONFIG_AML_BOARD
+	struct sdio_func *func = p_data->sdio_func[FUNC_1];
+#endif
 
 	pr_info("%s\n", __func__);
+
+#ifdef CONFIG_AML_BOARD
+	/* As for amlogic platform, Not remove sdio card.
+	 * When system is booting up, amlogic platform will power
+	 * up and get wifi module sdio id to know which vendor.
+	 * Then power down. In order to not rescan sdio card,
+	 * reset and reinit sdio host and slave is needed.
+	 */
+	sdio_reinit();
+	sdiohal_irq_register();
+#endif
 
 #ifndef CONFIG_THIRD_PARTY_BOARD 
 	if (!p_data->sdio_dev_host) {
@@ -1716,6 +1808,40 @@ int sdiohal_scan_card(void *wcn_dev)
 
 	if (WCN_CARD_EXIST(&p_data->xmit_cnt)) {
 		pr_info("Already exist card!\n");
+
+#ifdef CONFIG_AML_BOARD
+		/*
+		 * setting sdio max request size to 512kB
+		 * to improve transmission efficiency.
+		 */
+		sdio_set_max_regs(0x80000);
+
+		if (!p_data->pwrseq_enable) {
+			/* Enable Function 1 */
+			sdio_claim_host(p_data->sdio_func[FUNC_1]);
+			ret = sdio_enable_func(p_data->sdio_func[FUNC_1]);
+			sdio_set_block_size(p_data->sdio_func[FUNC_1],
+					    SDIOHAL_BLK_SIZE);
+			p_data->sdio_func[FUNC_1]->max_blksize =
+				SDIOHAL_BLK_SIZE;
+			sdio_release_host(p_data->sdio_func[FUNC_1]);
+			if (ret < 0) {
+				pr_err("enable func1 err!!! ret is %d\n",
+				       ret);
+				return ret;
+			}
+			pr_info("enable func1 ok\n");
+		} else {
+			pm_runtime_put_noidle(&func->dev);
+		}
+
+		/* calling rescan callback to inform download */
+		if (scan_card_notify != NULL)
+			scan_card_notify();
+		pr_info("scan end!\n");
+		return 0;
+#endif /* CONFIG_AML_BOARD */
+
 		sdiohal_remove_card(wcn_dev);
 		msleep(100);
 	}
@@ -1785,6 +1911,9 @@ int sdiohal_init(void)
 
 	sdiohal_launch_thread();
 	
+#ifdef CONFIG_AML_BOARD
+	sdiohal_host_irq_init(0);
+#else
 	if(p_data->irq_type != SDIOHAL_RX_INBAND_IRQ)
 	{
 		if (gpio_is_valid(p_data->gpio_num)) 
@@ -1792,6 +1921,7 @@ int sdiohal_init(void)
 			sdiohal_host_irq_init(p_data->gpio_num);
 		}
 	}
+#endif
 	
 	p_data->flag_init = true;
 	/* card not ready */
@@ -1818,6 +1948,10 @@ void sdiohal_exit(void *wcn_dev)
 		pr_info("Already exist card!\n");
 		sdiohal_remove_card(wcn_dev);
 	}
+#ifdef CONFIG_AML_BOARD
+	reinit_completion(&sdiohal_data->remove_done);
+	sdio_unregister_driver(&sdiohal_driver);
+#endif
 	if ((sdiohal_data->irq_type == SDIOHAL_RX_EXTERNAL_IRQ) &&
 		(sdiohal_data->irq_num > 0))
 		gpio_free(sdiohal_data->gpio_num);
